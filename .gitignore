@@ -1,3 +1,6 @@
+scripts/add-mo/**/test.sh
+scripts/add-mo/**/
+scripts/add-mo/**/
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
