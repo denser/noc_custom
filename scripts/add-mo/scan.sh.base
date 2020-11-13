@@ -1,0 +1,243 @@
+#!/bin/bash
+if [ "$2" != "stations" ] && [ "$2" != "routers" ] && [ "$2" != "core" ] && [ "$2" != "sectors" ]
+then
+  echo "Need to choose what to scan:
+		- stations
+		- routers
+		- core
+		- sectors
+		i.e. 
+		scan.sh scan stations"
+	exit
+fi
+echo "========================="
+echo "Start discovery $2 at "`date +%Y.%m.%d" "%H:%M:%S`
+devicetype=$2
+
+export LANG="ru_RU.UTF-8"
+export LOCALE="ru_RU"
+export BASEDIR="$( cd "$(dirname "$0")" ; pwd -P )"
+export PGPASSWORD='noc';
+MAXTHREAD=20
+
+BASEDIR=$BASEDIR/$devicetype
+mkdir -p $BASEDIR
+touch $BASEDIR/excludescan.txt
+touch $BASEDIR/getexclude.sql
+touch $BASEDIR/out.scan.txt
+touch $BASEDIR/out.hostsscan.txt
+touch $BASEDIR/result.hostsadd.csv
+me="$(basename "$(test -L "$0" && readlink "$0" || echo "$0")")"
+
+NMAPBIN="/usr/bin/nmap -sn -n -iL $BASEDIR/_${devicetype}.txt --excludefile $BASEDIR/excludescan.tmp -oG $BASEDIR/out.scan.txt"
+# вынимаем из БД уже занесённые IP и выводим в файл исключений, чтобы повторно их не сканировать.
+/usr/bin/psql -h 10.125.125.60 -p 5432 -U noc --dbname noc -X -A -t -q --no-align -f $BASEDIR/getexclude.sql -o $BASEDIR/excludescan.tmp
+# добавляем заведомо ненужные хосты в файл исключений
+cat $BASEDIR/excludescan.txt >> $BASEDIR/excludescan.tmp
+# заносим параметры by-default для формирования csv файла
+is_managed="True"
+administrative_domain="default"
+profile="Generic.Host"
+object_profile="default"
+description="$(/bin/date +%d.%m.%Y)"
+segment="ALL"
+auth_profile=""
+#1 telnet
+#2 ssh
+#3 http
+scheme="2"
+address=""
+port=0
+user=""
+password=""
+super_password=""
+remote_path=""
+trap_source_ip=""
+trap_community="skymax"
+snmp_ro="skymax"
+snmp_rw=""
+vc_domain=""
+vrf=""
+#termination_group=""
+#service_terminator=""
+shape=""
+#config_filter_rule=""
+#config_diff_filter_rule=""
+#config_validation_rule=""
+max_scripts="5"
+tags="autoadd"
+pool="default"
+container=""
+pool="default"
+trap_source_type="m"
+syslog_source_type="m"
+object_profile="default"
+time_pattern=""
+x=""
+y=""
+default_zoom=""
+headcvs="name,is_managed,container,administrative_domain,segment,pool,profile,object_profile,description,auth_profile,scheme,address,port,user,password,super_password,remote_path,trap_source_type,trap_source_ip,syslog_source_type,syslog_source_ip,trap_community,snmp_ro,snmp_rw,vc_domain,vrf,shape,time_pattern,max_scripts,tags"
+#headcvs="name,is_managed,container,administrative_domain,segment,pool,profile,object_profile,description,auth_profile,scheme,address,port,user,password,super_password,remote_path,trap_source_type,trap_source_ip,syslog_source_type,syslog_source_ip,trap_community,snmp_ro,snmp_rw,vc_domain,vrf,termination_group,service_terminator,shape,time_pattern,max_scripts,x,y,default_zoom,tags"
+
+
+# выполняем сканирование сети, в качестве параметра берём диапазон переданный из файла.
+if [ "$1" = "scan" ]
+then
+	# очищаем вывод от предыдущего запуска
+	cd $BASEDIR && rm result* out*
+	# сканируем сеть
+	$NMAPBIN
+	grep "Host" $BASEDIR/out.scan.txt  | grep "Status: Up" | awk '{print $2}' > $BASEDIR/out.hostsscan.txt
+fi
+# читаем построчно получившийся файл и начинаем формировать файл для загрузки в бд.
+while read -r line
+do
+  name=$line
+  echo "$name"
+    read -r address  <<<  "$line"
+ 
+# проверяем что вывод ненулевой и проверяем есть ли оно в бд
+    if [ -n "$address" ]
+        then
+ 
+      # проверяем сколько процессов уже запущено чтобы не был высоким Load Average
+      while [ $(($( /bin/ps aux  | grep -c $me ) - 1)) -ge "$MAXTHREAD" ]
+                do
+      #            echo $(($( /bin/ps aux  | grep "cli-commands" | wc -l) - 1)).
+             sleep 1
+          #        echo "sleep"
+      done
+ 
+        SQLQUERY="SELECT address FROM sa_managedobject where address = '$address' and name not like 'wiping-%' limit 1 ;"
+        SQLRESULT=$(echo "$SQLQUERY" | psql -h 10.125.125.60 -p 5432 -U noc --dbname noc -X -A -t -q  --no-align)
+# Проверяем доступность БД
+  RETVAL=$?
+  echo $RETVAL
+ 
+  if [ $RETVAL -eq 1  ]
+      then
+      echo "Postgress is unavailable"
+      exit
+  fi
+ 
+ 
+  if [ -n "$SQLRESULT" -a $RETVAL -eq 0 ]
+      then
+		# хост присутствует в БД и можно проверить для него SNMP для обновления данных
+		echo -e "$SQLRESULT" "есть в БД"
+		# выводим адресс в файл
+		echo -e "$address" >> $BASEDIR/out.hostsbd.txt
+
+      else
+		echo -e "$SQLRESULT" "нет в БД"
+		# по параметрам default заполняет строку нужными значениями
+		# выводим в файл out.hostsadd.txt так как данного хоста нету в БД
+
+		# необходимо чтобы нормально работал trap и syslog
+        trap_source_ip="$address"
+        syslog_source_ip="$address"
+		# формируем имя МО, сходив в PTR и вырезав ненужный хвост домена
+		#fqdn="$(host "$address" | awk '{print $5}' | sed 's/\.domain\.ru\.$//')"
+		#ADDROW="$fqdn,$is_managed,$container,$administrative_domain,$segment,$pool,$profile,$object_profile,$description,$auth_profile,$scheme,$address,$port,$user,$password,$super_password,$remote_path,$trap_source_type,$trap_source_ip,$syslog_source_type,$syslog_source_ip,$trap_community,$snmp_ro,$snmp_rw,$vc_domain,$vrf,$termination_group,$service_terminator,$shape,$time_pattern,$config_filter_rule,$config_diff_filter_rule,$config_validation_rule,$max_scripts,$x,$y,$default_zoom,$tags"
+		#echo -e "$ADDROW" >> $BASEDIR/out.hostsadd.txt
+ # fi
+ 
+		# или делаем более простой вариант добавляя только по адресу:
+		name="$address"
+		ipoct4=$(echo $address | tr "." " " | awk '{ print $4 }')
+		if [ ${#ipoct4} -le 2 ]
+			then
+			skymax_password="sky${ipoct4}max"
+			else
+			skymax_password="sky${ipoct4: -2}max"
+		fi
+		case $devicetype in
+			stations)
+				# если шлюз 172.16.0.1 и т.п., то не сканим, этот апйи будет у роутера, который сканится по лупбеку
+				if [ $ipoct4 -eq 1 ]
+					then
+					continue
+				fi
+				######################## доделать БЛЯТЬ перенос строки сраный
+				administrative_domain="Абонентские станции"
+				auth_profile="Abon.Admin"
+				shape="Cisco/satellite_dish"
+				tags="autoadd,абонент,яшкино"
+				object_profile="Абонент"
+				segment="Абоненты"
+				trap_community=""
+				snmp_ro=""
+				# do some magick on tiks
+				dummy=`sshpass -p "detpoik" ssh -o StrictHostKeyChecking=no admin@$address '/snmp community set 0 addresses=10.125.125.0/24,10.15.125.0/24 name="skymax" read-acces="yes" write-acces="no";/snmp set contact="Skymax" location="Skymax" trap-community="skymax" trap-version=2 enabled="yes";/snmp set trap-target=10.125.125.60;/snmp set trap-generators=interfaces;/snmp set trap-interfaces=all;/snmp set enabled="yes";/system identity set name=[/interface wireless get value-name=radio-name [find disabled=no]];' < /dev/null`
+			;;
+			routers)
+				administrative_domain="Роутеры"
+				object_profile="Mikrotik routers"
+				user="rb"
+				password=$skymax_password
+				shape="Cisco/router"
+				tags="autoadd,роутер"
+				dummy=`sshpass -p "${password}" ssh -o StrictHostKeyChecking=no ${user}@$address '/snmp community set 0 addresses=10.125.125.0/24,10.15.125.0/24 name="skymax" read-acces="yes" write-acces="no";/snmp set contact="Skymax" location="Skymax" trap-community="skymax" trap-version=2 enabled="yes";/snmp set trap-target=10.125.125.60;/snmp set trap-generators=interfaces;/snmp set trap-interfaces=all;/snmp set enabled="yes";:do {/user aaa set use-radius=yes;/radius remove [find];/radius add address=10.125.125.122 secret="AUI8XpBy9ca_13246yyhh" service=login;} on-error={};' < /dev/null`
+				# add radius auth
+
+			;;
+			sectors)
+				# если шлюз 172.16.0.1 и т.п., то не сканим, этот апйи будет у роутера, который сканится по лупбеку
+				if [ $ipoct4 -eq 1 ]
+					then
+					continue
+				fi
+				administrative_domain="Секторы"
+				user="brt"
+				password=$skymax_password
+				shape="Cisco/radio_tower"
+				tags="autoadd,сектор"
+				dummy=`sshpass -p "${password}" ssh -o StrictHostKeyChecking=no ${user}@$address '/snmp community set 0 addresses=10.125.125.0/24,10.15.125.0/24 name="skymax" read-acces="yes" write-acces="no";/snmp set contact="Skymax" location="Skymax" trap-community="skymax" trap-version=2 enabled="yes";/snmp set trap-target=10.125.125.60;/snmp set trap-generators=interfaces;/snmp set trap-interfaces=all;/snmp set enabled="yes";' < /dev/null`
+				
+			;; 
+			core)
+				administrative_domain="Ядро"
+				auth_profile="KMR.ADMIN.CORE"
+				shape="Cisco/router"
+				tags="autoadd,ядро"
+			;;
+		esac
+		ADDROW="$name,$is_managed,$container,$administrative_domain,$segment,$pool,$profile,$object_profile,$description,$auth_profile,$scheme,$address,$port,$user,$password,$super_password,$remote_path,$trap_source_type,$trap_source_ip,$syslog_source_type,$syslog_source_ip,$trap_community,$snmp_ro,$snmp_rw,$vc_domain,$vrf,$shape,$time_pattern,$max_scripts,\"$tags\""
+		  echo -e "$ADDROW" >> $BASEDIR/out.hostsadd.txt
+  fi
+ 
+    fi
+    echo -e "---------------\n"
+done < $BASEDIR/out.hostsscan.txt
+# проверка
+#exit
+# проверяем есть ли новые хосты. если есть то отправляем почту и добавляем в бд
+# склеиваем CVS из "шапки" и "тела"
+ 
+sleep 5
+ 
+if [ -a $BASEDIR/out.hostsadd.txt ]
+    then
+  echo $headcvs > $BASEDIR/result.hostsadd.csv
+  cat out.hostsadd.txt >> $BASEDIR/result.hostsadd.csv
+ 
+  # добавление хостов.
+  cd /opt/noc && ./noc csv-import --resolve=skip sa.managedobject $BASEDIR/result.hostsadd.csv
+  RETVAL=$?
+ 
+  if [ $RETVAL -ne 0 ]
+      then
+      echo "error import"
+      #/usr/bin/mail  -s "Ошибка импорта данных" -A $BASEDIR/result.hostsadd.csv noc@mosreg.ru < $BASEDIR/result.hostsadd.csv
+  fi
+  # отправка почты
+  #/usr/bin/mail  -s "Найденные новые хосты СПД" -A $BASEDIR/result.hostsadd.csv noc@mosreg.ru < $BASEDIR/result.hostsadd.csv
+fi
+ 
+# переносим файл в архив.
+mkdir -p $BASEDIR/data/"$(/bin/date +%Y)"
+if [ -a $BASEDIR/result.hostsadd.csv ]
+	then
+	cp $BASEDIR/result.hostsadd.csv $BASEDIR/data/"$(/bin/date +%Y)"/"$(/bin/date +%Y%m%d)".csv
+fi
+echo "Finish discovery $2 at "`date +%Y.%m.%d" "%H:%M:%S`
