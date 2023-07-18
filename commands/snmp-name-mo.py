@@ -8,12 +8,16 @@
 
 import re
 import commands
+import subprocess
+import os
 from datetime import datetime
 from multiprocessing.dummy import Pool as ThreadPool
 from noc.sa.models.managedobject import ManagedObject
 from noc.sa.models.objectstatus import ObjectStatus
+from noc.core.mongo.connection import connect
 
-    
+connect()
+
 def snmpname_get(m):
     #print m.name, m.address, m.profile, m.snmp_ro # ОТЛАДКА
     
@@ -21,8 +25,16 @@ def snmpname_get(m):
     if m.snmp_ro and ObjectStatus.get_status(m):
         # Опрашиваем устройство
         cmd = "/usr/bin/snmpget -t 2 -r 1 -v 2c -Oqv -c {} {} .1.3.6.1.2.1.1.5.0 ".format(m.snmp_ro, m.address)
-        snmpname = commands.getoutput(cmd).replace('"', '')
-        #print 'Device: {}\tSNMP_Result: {}'.format(m.address, snmpname) # ОТЛАДКА
+        #print(cmd)
+        #cmd = "/usr/bin/snmpget"
+        #par = "-t 2 -r 1 -v 2c -Oqv -c {} {} .1.3.6.1.2.1.1.5.0 ".format(m.snmp_ro, m.address)
+        #snmpname = commands.getoutput(cmd).replace('"', '')
+        output = subprocess.check_output(cmd, shell=True)
+        #output = os.system(cmd)
+        #print(output)
+        snmpname = '{}'.format(output).replace('"', '').replace('b\'', '').replace('\\n\'', '')
+
+        print ('Device: {}\tSNMP_Result: {}'.format(m.address, snmpname)) # ОТЛАДКА
         
         # Если hostname отсутствует или опрос по SNMP неудачен - записываем IP-адрес в качество hostname
         if any([not snmpname, 'Timeout' in snmpname, 'No Such Object' in snmpname]):
@@ -53,7 +65,7 @@ def snmpname_get(m):
                     m.save()
                     return 'Duplicate'
                 except:
-                    print "Error save"
+                    print ("Error save")
                     return 'Error'
         else:
             if snmpname != m.address:
@@ -75,9 +87,9 @@ if __name__ == '__main__':
     # задаем количество потоков
     max_workers = 10
     # задаем правило проверки hostname роутеров
-    snmp_regex = re.compile('\S+(-cr\d?|-dr\d?|-rgr\d?|-ar\d?|-bpe\d?)$', re.IGNORECASE)
+    snmp_regex = re.compile('(-RB-|\.RB\.|CORE)', re.IGNORECASE)
     # Адреса loopback
-    loopbacks = []                
+    loopbacks = ['10.254.', '10.255.']
     # получаем список объектов, имеющих snmp_ro
     mo = ManagedObject.objects.filter(is_managed=True,snmp_ro__isnull=False)
     # Засекаем время    
@@ -88,13 +100,13 @@ if __name__ == '__main__':
     end_time = datetime.now() - start_time
 
     # Статистика отработки
-    print '{:=^40}'.format(' Result ')
-    print '{:<25} {:<14}'.format('Total device count:', len(mo))
-    print '{:<25} {:<14}'.format('Name = hostname in DB:', result.count('Name_in_DB'))
-    print '{:<25} {:<14}'.format('Name = IP in DB:', result.count('IP_in_DB'))
-    print '{:<25} {:<14}'.format('Good add in DB:', result.count('Good'))
-    print '{:<25} {:<14}'.format('Duplicate add in DB:', result.count('Duplicate'))
-    print '{:<25} {:<14}'.format('Error add in DB:', result.count('Error'))
-    print '\n{:<25} {:<14}'.format('Threads number:', max_workers)
-    print '{:<25} {:<14}'.format('Run time:', end_time)
-    print '=' * 40
+    print ('{:=^40}'.format(' Result '))
+    print ('{:<25} {:<14}'.format('Total device count:', len(mo)))
+    print ('{:<25} {:<14}'.format('Name = hostname in DB:', result.count('Name_in_DB')))
+    print ('{:<25} {:<14}'.format('Name = IP in DB:', result.count('IP_in_DB')))
+    print ('{:<25} {:<14}'.format('Good add in DB:', result.count('Good')))
+    print ('{:<25} {:<14}'.format('Duplicate add in DB:', result.count('Duplicate')))
+    print ('{:<25} {:<14}'.format('Error add in DB:', result.count('Error')))
+    print ('\n{:<25} {:<14}'.format('Threads number:', max_workers))
+    print ('{:<25} {:<14}'.format('Run time:', end_time))
+    print ('=' * 40)
